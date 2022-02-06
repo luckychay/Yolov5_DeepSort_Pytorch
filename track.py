@@ -38,9 +38,9 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 
 def detect(opt):
-    out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, project, name, exist_ok, roi, do_entrance_counting = \
+    out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, project, name, exist_ok, roi, do_entrance_counting= \
         opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
-        opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.name, opt.exist_ok, opt.roi, opt.entr_counting
+        opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.name, opt.exist_ok, opt.roi, opt.en_counting
     webcam = source == '0' or source.startswith(
         'rtsp') or source.startswith('http') or source.endswith('.txt')
 
@@ -106,29 +106,29 @@ def detect(opt):
     txt_file_name = source.split('/')[-1].split('.')[0]
     txt_path = str(Path(save_dir)) + '/' + txt_file_name + '.txt'
 
-    # Prepare for entrance counting 
+    # Prepare for entrance counting
     if do_entrance_counting:
-        prev_center = dict()
+        shape = dataset.imgs[0].shape
+        in_id_list = list()
+        out_id_list = list()
         in_flag = dict()
         out_flag = dict()
-        in_id_list  = list()
-        out_id_list  = list()     
+        prev_center = dict()
         count_str = ""
+        # Determination of the lines may be tricky
+        entrance1 =  tuple(map(int,[0, shape[0] / 2.0, shape[1], shape[0] / 2.0]))
+        entrance2 =  tuple(map(int,[0, shape[0] / 1.5, shape[1], shape[0] / 1.5]))
 
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
     dt, seen = [0.0, 0.0, 0.0, 0.0], 0
     for frame_idx, (path, img, im0s, vid_cap, s) in enumerate(dataset):
-
-        # Use ROI Filter
+ 
+        # Use roi to filter 
         if roi:
-            roi_origin = (50,180)
-            img[roi[0:roi_origin[0],:]] = 0
-            img[roi[:,roi_origin[0]:roi_origin[1]]] = 0
-
-        if do_entrance_counting:    
-            entrance1 = tuple(map(int,[0, img.shape[2] / 1.5, img.shape[3], img.shape[2] / 1.5]))
-            entrance2 = tuple(map(int,[0, img.shape[2] / 1.2, img.shape[3], img.shape[2] / 1.2]))
+            origin = (50,180)
+            img[...,0:origin[1],:] = 0
+            img[...,origin[1]::,0:origin[0]] = 0
 
         t1 = time_sync()
         img = torch.from_numpy(img).to(device)
@@ -177,15 +177,15 @@ def detect(opt):
                 xywhs = xyxy2xywh(det[:, 0:4])
                 confs = det[:, 4]
                 clss = det[:, 5]
-
+  
                 # pass detections to deepsort
                 t4 = time_sync()
                 outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
                 t5 = time_sync()
                 dt[3] += t5 - t4
-
                 # draw boxes for visualization
                 if len(outputs) > 0:
+
                     for j, (output, conf) in enumerate(zip(outputs, confs)):
 
                         bboxes = output[0:4]
@@ -196,41 +196,47 @@ def detect(opt):
                         label = f'{track_id} {names[c]} {conf:.2f}'
                         annotator.box_label(bboxes, label, color=colors(c, True))
 
-                        # Use two line to count
-                        if do_entrance_counting and c == 0:
-                            entrance_y1 = entrance1[1]  
+                        # Use two line to do entrance counting
+                        if do_entrance_counting and cls==0:
+                            entrance_y1 = entrance1[1] 
                             entrance_y2 = entrance2[1]
-
-                            x1, y1, w, h = bboxes
-                            center_x = x1 + w / 2.
-                            center_y = y1 + h / 2.
 
                             if track_id < 0: continue
 
+                            x1, y1, x2,y2 = bboxes
+                            center_x = (x1 + x2)/2.
+                            center_y = (y1 + y2)/2.
+
                             if track_id in prev_center:
+
+                                print(prev_center[track_id][1],center_y,entrance_y1,entrance_y2)
+
+                                # In number counting 
                                 if prev_center[track_id][1] <= entrance_y1 and \
                                 center_y > entrance_y1:
-                                    in_flag[track_id][0] = 1
-                               
-                                if prev_center[track_id][1] >= entrance_y2 and \
-                                center_y < entrance_y2:
-                                    out_flag[track_id][0] = 1
-                           
-                                if prev_center[track_id][1] <= entrance_y2 and \
-                                center_y > entrance_y2 and in_flag[track_id][0]:
+                                    in_flag[track_id] = 1
+                                elif prev_center[track_id][1] <= entrance_y2 and \
+                                center_y > entrance_y2 and in_flag[track_id] == 1:
                                     in_id_list.append(track_id)
-                                    in_flag[track_id][0] = 0
-                                
-                                if prev_center[track_id][1] >= entrance_y1 and \
-                                center_y < entrance_y1 and out_flag[track_id][0]:
+                                    in_flag[track_id] = 0
+
+                                # Out number counting
+                                elif prev_center[track_id][1] >= entrance_y2 and \
+                                center_y < entrance_y2:
+                                    out_flag[track_id] = 1
+                                elif prev_center[track_id][1] >= entrance_y1 and \
+                                center_y < entrance_y1 and out_flag[track_id] == 1:
                                     out_id_list.append(track_id)
-                                    out_flag[track_id][0] = 0
+                                    out_flag[track_id] = 0
 
                                 prev_center[track_id] = [center_x, center_y]
                             else:
                                 prev_center[track_id] = [center_x, center_y]
-                                in_flag[track_id] = [0,0]
-                                out_flag[track_id] = [0,0]
+                                in_flag[track_id] = 0
+                                out_flag[track_id] = 0
+                            
+                            count_str = f"In: {len(in_id_list)}, Out: {len(out_id_list)}"
+                            print(count_str)
 
                         if save_txt:
                             # to MOT format
@@ -242,18 +248,17 @@ def detect(opt):
                             with open(txt_path, 'a') as f:
                                 f.write(('%g ' * 10 + '\n') % (frame_idx + 1, id, bbox_left,  # MOT format
                                                                bbox_top, bbox_w, bbox_h, -1, -1, -1, -1))
-                                                               
-                count_str = f'in: {len(in_id_list)} out: {len(out_id_list)}'    
-                print(count_str)
+
                 LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
 
             else:
                 deepsort.increment_ages()
-                LOGGER.info('No detections')
+                # LOGGER.info('No detections')
 
             # Stream results
             im0 = annotator.result()
             if show_vid:
+                
                 if do_entrance_counting:
                     cv2.rectangle(im0,entrance1[0:2],entrance1[2:4],(0,255,255),1)
                     cv2.rectangle(im0,entrance2[0:2],entrance2[2:4],(0,255,255),1)
@@ -315,8 +320,8 @@ if __name__ == '__main__':
     parser.add_argument('--project', default=ROOT / 'runs/track', help='save results to project/name')
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
-    parser.add_argument('--roi', action='store_true', help='turn on roi')
-    parser.add_argument('--entr_counting', action='store_true', help='turn on entrance counting')
+    parser.add_argument('--roi', action='store_true', help='turn on roi filter')
+    parser.add_argument('--en_counting', action='store_true', help='turn on entrance counting')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
 
