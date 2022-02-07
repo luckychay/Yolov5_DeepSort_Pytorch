@@ -16,6 +16,9 @@ import shutil
 import time
 from pathlib import Path
 import cv2
+import numpy as np
+from PIL import Image
+from PIL import ImageEnhance
 import torch
 import torch.backends.cudnn as cudnn
 
@@ -38,9 +41,9 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 
 def detect(opt):
-    out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, project, name, exist_ok, roi, do_entrance_counting= \
+    out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, project, name, exist_ok, roi, do_entrance_counting, do_process= \
         opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
-        opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.name, opt.exist_ok, opt.roi, opt.en_counting
+        opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.name, opt.exist_ok, opt.roi, opt.en_counting,opt.process
     webcam = source == '0' or source.startswith(
         'rtsp') or source.startswith('http') or source.endswith('.txt')
 
@@ -70,7 +73,6 @@ def detect(opt):
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     save_dir.mkdir(parents=True, exist_ok=True)  # make dir
-
     # Load model
     device = select_device(device)
     model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn)
@@ -123,7 +125,41 @@ def detect(opt):
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
     dt, seen = [0.0, 0.0, 0.0, 0.0], 0
     for frame_idx, (path, img, im0s, vid_cap, s) in enumerate(dataset):
- 
+        
+        if do_process:
+        # do equilized histgram for BCHW RGB images
+            for i in range(img.shape[0]): 
+                pic = img[i][::-1,...].transpose((1,2,0)) # move the channel dim to the last and convert into BGR(Opencv needs)
+                # (b,g,r) = cv2.split(pic)
+                # b = cv2.GaussianBlur(b,(7,7),0)
+                # g = cv2.GaussianBlur(g,(7,7),0)
+                # r = cv2.GaussianBlur(r,(7,7),0)
+
+                # bH = cv2.equalizeHist(b)
+                # gH = cv2.equalizeHist(g)
+                # rH = cv2.equalizeHist(r)
+                # pic = cv2.merge((bH,gH,rH))
+                # cv2.imshow("equilized",pic)
+                # cv2.waitKey(1)
+                # img[i] = pic[...,::-1].transpose(2,0,1)
+                lab= cv2.cvtColor(pic, cv2.COLOR_BGR2LAB)
+
+                #-----Splitting the LAB image to different channels-------------------------
+                l, a, b = cv2.split(lab)
+
+                #-----Applying CLAHE to L-channel-------------------------------------------
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                cl = clahe.apply(l)
+
+                #-----Merge the CLAHE enhanced L-channel with the a and b channel-----------
+                limg = cv2.merge((cl,a,b))
+
+                #-----Converting image from LAB Color model to RGB model--------------------
+                final = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+                cv2.imshow('final', final)
+                cv2.waitKey(1)
+                img[i] = final[...,::-1].transpose(2,0,1)
+                im0s[i] = final.copy()
         # Use roi to filter 
         if roi:
             origin = (50,180)
@@ -279,9 +315,12 @@ def detect(opt):
                         h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                     else:  # stream
                         fps, w, h = 30, im0.shape[1], im0.shape[0]
+                        save_path += '.mp4'
 
                     vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+
                 vid_writer.write(im0)
+
 
     # Print results
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
@@ -322,6 +361,7 @@ if __name__ == '__main__':
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--roi', action='store_true', help='turn on roi filter')
     parser.add_argument('--en_counting', action='store_true', help='turn on entrance counting')
+    parser.add_argument('--process', action='store_true', help='turn on image processing')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
 
