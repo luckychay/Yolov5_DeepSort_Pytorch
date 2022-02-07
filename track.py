@@ -119,7 +119,7 @@ def detect(opt):
         count_str = ""
         # Determination of the lines may be tricky
         entrance1 =  tuple(map(int,[0, shape[0] / 2.0, shape[1], shape[0] / 2.0]))
-        entrance2 =  tuple(map(int,[0, shape[0] / 1.5, shape[1], shape[0] / 1.5]))
+        entrance2 =  tuple(map(int,[0, shape[0] / 1.8, shape[1], shape[0] / 1.8]))
 
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
@@ -190,7 +190,7 @@ def detect(opt):
             seen += 1
             if webcam:  # batch_size >= 1
                 p, im0, _ = path[i], im0s[i].copy(), dataset.count
-                s += f'{i}: '
+                s += f'webcam{i}: '
             else:
                 p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
@@ -245,8 +245,6 @@ def detect(opt):
 
                             if track_id in prev_center:
 
-                                print(prev_center[track_id][1],center_y,entrance_y1,entrance_y2)
-
                                 # In number counting 
                                 if prev_center[track_id][1] <= entrance_y1 and \
                                 center_y > entrance_y1:
@@ -295,10 +293,26 @@ def detect(opt):
             im0 = annotator.result()
             if show_vid:
                 
+                
+
+                lw = 3
+                tf = max(lw - 1, 1)
+                w, h = cv2.getTextSize(s, 0, fontScale=lw / 3, thickness=tf)[0] 
+                p1 = (0,0)
+                p2 = (p1[0] + int(w), p1[1]+int(h)+10)
+                cv2.rectangle(im0, p1, p2, (0,240,240), -1, cv2.LINE_AA)  # filled
+                cv2.putText(im0, s, (p1[0], p1[1]+h+3), 0, lw / 3, (255,255,255),
+                            thickness=tf, lineType=cv2.LINE_AA)
+
                 if do_entrance_counting:
+                    w, h = cv2.getTextSize(count_str, 0, fontScale=lw / 3, thickness=tf)[0]
+                    p1 = (0,p2[1])
+                    p2 = (p1[0] + int(w), p1[1]+int(h)+10)
+                    cv2.rectangle(im0, p1, p2, (240,240,0), -1, cv2.LINE_AA)  # filled
+                    cv2.putText(im0, count_str, (p1[0], p1[1]+h+3), 0, lw / 3, (255,255,255),
+                                thickness=tf, lineType=cv2.LINE_AA)
                     cv2.rectangle(im0,entrance1[0:2],entrance1[2:4],(0,255,255),1)
                     cv2.rectangle(im0,entrance2[0:2],entrance2[2:4],(0,255,255),1)
-
                 cv2.imshow(str(p), im0)
                 if cv2.waitKey(1) == ord('q'):  # q to quit
                     raise StopIteration
