@@ -1,5 +1,7 @@
 # limit the number of cpus used by high performance libraries
 import os
+
+from cv2 import WINDOW_NORMAL
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -142,6 +144,7 @@ def detect(opt):
                 # cv2.imshow("equilized",pic)
                 # cv2.waitKey(1)
                 # img[i] = pic[...,::-1].transpose(2,0,1)
+
                 lab= cv2.cvtColor(pic, cv2.COLOR_BGR2LAB)
 
                 #-----Splitting the LAB image to different channels-------------------------
@@ -156,8 +159,9 @@ def detect(opt):
 
                 #-----Converting image from LAB Color model to RGB model--------------------
                 final = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-                cv2.imshow('final', final)
-                cv2.waitKey(1)
+
+                # cv2.imshow('final', final)
+                # cv2.waitKey(1)
                 img[i] = final[...,::-1].transpose(2,0,1)
                 im0s[i] = final.copy()
         # Use roi to filter 
@@ -233,7 +237,7 @@ def detect(opt):
                         annotator.box_label(bboxes, label, color=colors(c, True))
 
                         # Use two line to do entrance counting
-                        if do_entrance_counting and cls==0:
+                        if do_entrance_counting and cls in opt.classes:
                             entrance_y1 = entrance1[1] 
                             entrance_y2 = entrance2[1]
 
@@ -293,8 +297,6 @@ def detect(opt):
             im0 = annotator.result()
             if show_vid:
                 
-                
-
                 lw = 3
                 tf = max(lw - 1, 1)
                 w, h = cv2.getTextSize(s, 0, fontScale=lw / 3, thickness=tf)[0] 
@@ -313,6 +315,9 @@ def detect(opt):
                                 thickness=tf, lineType=cv2.LINE_AA)
                     cv2.rectangle(im0,entrance1[0:2],entrance1[2:4],(0,255,255),1)
                     cv2.rectangle(im0,entrance2[0:2],entrance2[2:4],(0,255,255),1)
+
+                # cv2.namedWindow(str(p),WINDOW_NORMAL)  
+                # cv2.resizeWindow(str(p),640,480)  
                 cv2.imshow(str(p), im0)
                 if cv2.waitKey(1) == ord('q'):  # q to quit
                     raise StopIteration
@@ -370,8 +375,8 @@ if __name__ == '__main__':
     parser.add_argument('--visualize', action='store_true', help='visualize features')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detection per image')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
-    parser.add_argument('--project', default=ROOT / 'runs/track', help='save results to project/name')
-    parser.add_argument('--name', default='exp', help='save results to project/name')
+    parser.add_argument('--project', default=ROOT / 'inference', help='save results to project/name')
+    parser.add_argument('--name', default='output', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--roi', action='store_true', help='turn on roi filter')
     parser.add_argument('--en_counting', action='store_true', help='turn on entrance counting')
