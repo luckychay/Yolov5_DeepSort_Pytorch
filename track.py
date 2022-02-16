@@ -23,6 +23,7 @@ from PIL import Image
 from PIL import ImageEnhance
 import torch
 import torch.backends.cudnn as cudnn
+from datasets import LoadRosTopic
 
 from yolov5.models.experimental import attempt_load
 from yolov5.utils.downloads import attempt_download
@@ -43,13 +44,20 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 
 def detect(opt):
-    out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, project, name, exist_ok, roi, do_entrance_counting, do_process= \
+
+    out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
+        project, name, exist_ok, roi, do_entrance_counting, do_process, topic = \
         opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
-        opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.name, opt.exist_ok, opt.roi, opt.en_counting,opt.process
+        opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.name, opt.exist_ok, opt.roi, \
+        opt.en_counting, opt.process, opt.topic
+
     webcam = source == '0' or source.startswith(
         'rtsp') or source.startswith('http') or source.endswith('.txt')
 
+    rostopic = source == '1'
+
     device = select_device(opt.device)
+
     # initialize deepsort
     cfg = get_config()
     cfg.merge_from_file(opt.config_deepsort)
@@ -61,7 +69,6 @@ def detect(opt):
                         )
 
     # Initialize
-    
     half &= device.type != 'cpu'  # half precision only supported on CUDA
 
     # The MOT16 evaluation runs multiple inference streams in parallel, each one writing to
@@ -88,6 +95,7 @@ def detect(opt):
 
     # Set Dataloader
     vid_path, vid_writer = None, None
+
     # Check if environment supports image displays
     if show_vid:
         show_vid = check_imshow()
@@ -98,7 +106,12 @@ def detect(opt):
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt and not jit)
         bs = len(dataset)  # batch_size
-    else:
+    elif rostopic:
+        show_vid = check_imshow()
+        cudnn.benchmark = True  # set True to speed up constant image size inference
+        dataset = LoadRosTopic(topic, img_size=imgsz, stride=stride, auto=pt and not jit)
+        bs = len(dataset)  # batch_size
+    else:   
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt and not jit)
         bs = 1  # batch_size
     vid_path, vid_writer = [None] * bs, [None] * bs
@@ -112,234 +125,236 @@ def detect(opt):
 
     # Prepare for entrance counting
     if do_entrance_counting:
-        shape = dataset.imgs[0].shape
         in_id_list = list()
         out_id_list = list()
         in_flag = dict()
         out_flag = dict()
         prev_center = dict()
         count_str = ""
-        # Determination of the lines may be tricky
-        entrance1 =  tuple(map(int,[0, shape[0] / 2.0, shape[1], shape[0] / 2.0]))
-        entrance2 =  tuple(map(int,[0, shape[0] / 1.8, shape[1], shape[0] / 1.8]))
+
 
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
     dt, seen = [0.0, 0.0, 0.0, 0.0], 0
-    for frame_idx, (path, img, im0s, vid_cap, s) in enumerate(dataset):
+
+    for frame_idx, (path, img, im0s, vid_cap, s, tram_status) in enumerate(dataset):
         
-        if do_process:
-        # do equilized histgram for BCHW RGB images
-            for i in range(img.shape[0]): 
-                pic = img[i][::-1,...].transpose((1,2,0)) # move the channel dim to the last and convert into BGR(Opencv needs)
-                # (b,g,r) = cv2.split(pic)
-                # b = cv2.GaussianBlur(b,(7,7),0)
-                # g = cv2.GaussianBlur(g,(7,7),0)
-                # r = cv2.GaussianBlur(r,(7,7),0)
+        # when stopped, start the detection process
+        if tram_status==0:
+            print("The tram is stopped, detection started.")
+            # do image enhancement
+            if do_process:
+            # do equilized histgram for BCHW RGB images
+                for i in range(img.shape[0]): 
+                    pic = img[i][::-1,...].transpose((1,2,0)) # move the channel dim to the last and convert into BGR(Opencv needs)
 
-                # bH = cv2.equalizeHist(b)
-                # gH = cv2.equalizeHist(g)
-                # rH = cv2.equalizeHist(r)
-                # pic = cv2.merge((bH,gH,rH))
-                # cv2.imshow("equilized",pic)
-                # cv2.waitKey(1)
-                # img[i] = pic[...,::-1].transpose(2,0,1)
+                    lab= cv2.cvtColor(pic, cv2.COLOR_BGR2LAB)
+                    #-----Splitting the LAB image to different channels-------------------------
+                    l, a, b = cv2.split(lab)
+                    #-----Applying CLAHE to L-channel-------------------------------------------
+                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                    cl = clahe.apply(l)
+                    #-----Merge the CLAHE enhanced L-channel with the a and b channel-----------
+                    limg = cv2.merge((cl,a,b))
+                    #-----Converting image from LAB Color model to RGB model--------------------
+                    final = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+                    # cv2.imshow('final', final)
+                    # cv2.waitKey(1)
+                    img[i] = final[...,::-1].transpose(2,0,1)
+                    im0s[i] = final.copy()
 
-                lab= cv2.cvtColor(pic, cv2.COLOR_BGR2LAB)
+            # Use roi to filter 
+            if roi:
+                origin = (50,180)
+                img[...,0:origin[1],:] = 0
+                img[...,origin[1]::,0:origin[0]] = 0
 
-                #-----Splitting the LAB image to different channels-------------------------
-                l, a, b = cv2.split(lab)
+            t1 = time_sync()
+            img = torch.from_numpy(img).to(device)
+            img = img.half() if half else img.float()  # uint8 to fp16/32
+            img /= 255.0  # 0 - 255 to 0.0 - 1.0
+            if img.ndimension() == 3:
+                img = img.unsqueeze(0)
+            t2 = time_sync()
+            dt[0] += t2 - t1
 
-                #-----Applying CLAHE to L-channel-------------------------------------------
-                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-                cl = clahe.apply(l)
+            # Inference
+            visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if opt.visualize else False
+            pred = model(img, augment=opt.augment, visualize=visualize)
+            t3 = time_sync()
+            dt[1] += t3 - t2
 
-                #-----Merge the CLAHE enhanced L-channel with the a and b channel-----------
-                limg = cv2.merge((cl,a,b))
+            # Apply NMS
+            pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
+            dt[2] += time_sync() - t3
 
-                #-----Converting image from LAB Color model to RGB model--------------------
-                final = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+            # Process detections
+            for i, det in enumerate(pred):  # detections per image
+                seen += 1
+                if webcam:  # batch_size >= 1
+                    p, im0, _ = path[i], im0s[i].copy(), dataset.count
+                    s += f'webcam{i}: '
+                else:
+                    p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
-                # cv2.imshow('final', final)
-                # cv2.waitKey(1)
-                img[i] = final[...,::-1].transpose(2,0,1)
-                im0s[i] = final.copy()
-        # Use roi to filter 
-        if roi:
-            origin = (50,180)
-            img[...,0:origin[1],:] = 0
-            img[...,origin[1]::,0:origin[0]] = 0
+                p = Path(p)  # to Path
+                save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
+                s += '%gx%g ' % img.shape[2:]  # print string
 
-        t1 = time_sync()
-        img = torch.from_numpy(img).to(device)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if img.ndimension() == 3:
-            img = img.unsqueeze(0)
-        t2 = time_sync()
-        dt[0] += t2 - t1
+                annotator = Annotator(im0, line_width=2, pil=not ascii)
 
-        # Inference
-        visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if opt.visualize else False
-        pred = model(img, augment=opt.augment, visualize=visualize)
-        t3 = time_sync()
-        dt[1] += t3 - t2
+                # Determination of the lines may be tricky
+                shape = im0.shape
+                entrance1 =  tuple(map(int,[0, shape[0] / 2.0, shape[1], shape[0] / 2.0]))
+                entrance2 =  tuple(map(int,[0, shape[0] / 1.8, shape[1], shape[0] / 1.8]))
 
-        # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
-        dt[2] += time_sync() - t3
+                if det is not None and len(det):
+                    # Rescale boxes from img_size to im0 size
+                    det[:, :4] = scale_coords(
+                        img.shape[2:], det[:, :4], im0.shape).round()
 
-        # Process detections
-        for i, det in enumerate(pred):  # detections per image
-            seen += 1
-            if webcam:  # batch_size >= 1
-                p, im0, _ = path[i], im0s[i].copy(), dataset.count
-                s += f'webcam{i}: '
-            else:
-                p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
+                    # Print results
+                    for c in det[:, -1].unique():
+                        n = (det[:, -1] == c).sum()  # detections per class
+                        s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
-            p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
-            s += '%gx%g ' % img.shape[2:]  # print string
+                    xywhs = xyxy2xywh(det[:, 0:4])
+                    confs = det[:, 4]
+                    clss = det[:, 5]
+    
+                    # pass detections to deepsort
+                    t4 = time_sync()
+                    outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
+                    t5 = time_sync()
+                    dt[3] += t5 - t4
 
-            annotator = Annotator(im0, line_width=2, pil=not ascii)
+                    # draw boxes for visualization
+                    if len(outputs) > 0:
+                        for j, (output, conf) in enumerate(zip(outputs, confs)):
 
-            if det is not None and len(det):
-                # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_coords(
-                    img.shape[2:], det[:, :4], im0.shape).round()
+                            bboxes = output[0:4]
+                            track_id = output[4]
+                            cls = output[5]
 
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+                            c = int(cls)  # integer class
+                            label = f'{track_id} {names[c]} {conf:.2f}'
+                            annotator.box_label(bboxes, label, color=colors(c, True))
 
-                xywhs = xyxy2xywh(det[:, 0:4])
-                confs = det[:, 4]
-                clss = det[:, 5]
-  
-                # pass detections to deepsort
-                t4 = time_sync()
-                outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
-                t5 = time_sync()
-                dt[3] += t5 - t4
-                # draw boxes for visualization
-                if len(outputs) > 0:
+                            # Use two line to do entrance counting
+                            if do_entrance_counting and cls in opt.classes:
 
-                    for j, (output, conf) in enumerate(zip(outputs, confs)):
+                                entrance_y1 = entrance1[1] 
+                                entrance_y2 = entrance2[1]
 
-                        bboxes = output[0:4]
-                        track_id = output[4]
-                        cls = output[5]
+                                if track_id < 0: continue
 
-                        c = int(cls)  # integer class
-                        label = f'{track_id} {names[c]} {conf:.2f}'
-                        annotator.box_label(bboxes, label, color=colors(c, True))
+                                x1, y1, x2,y2 = bboxes
+                                center_x = (x1 + x2)/2.
+                                center_y = (y1 + y2)/2.
 
-                        # Use two line to do entrance counting
-                        if do_entrance_counting and cls in opt.classes:
-                            entrance_y1 = entrance1[1] 
-                            entrance_y2 = entrance2[1]
+                                if track_id in prev_center:
 
-                            if track_id < 0: continue
+                                    # In number counting 
+                                    if prev_center[track_id][1] <= entrance_y1 and \
+                                    center_y > entrance_y1:
+                                        in_flag[track_id] = 1
+                                    elif prev_center[track_id][1] <= entrance_y2 and \
+                                    center_y > entrance_y2 and in_flag[track_id] == 1:
+                                        in_id_list.append(track_id)
+                                        in_flag[track_id] = 0
 
-                            x1, y1, x2,y2 = bboxes
-                            center_x = (x1 + x2)/2.
-                            center_y = (y1 + y2)/2.
+                                    # Out number counting
+                                    elif prev_center[track_id][1] >= entrance_y2 and \
+                                    center_y < entrance_y2:
+                                        out_flag[track_id] = 1
+                                    elif prev_center[track_id][1] >= entrance_y1 and \
+                                    center_y < entrance_y1 and out_flag[track_id] == 1:
+                                        out_id_list.append(track_id)
+                                        out_flag[track_id] = 0
 
-                            if track_id in prev_center:
-
-                                # In number counting 
-                                if prev_center[track_id][1] <= entrance_y1 and \
-                                center_y > entrance_y1:
-                                    in_flag[track_id] = 1
-                                elif prev_center[track_id][1] <= entrance_y2 and \
-                                center_y > entrance_y2 and in_flag[track_id] == 1:
-                                    in_id_list.append(track_id)
+                                    prev_center[track_id] = [center_x, center_y]
+                                else:
+                                    prev_center[track_id] = [center_x, center_y]
                                     in_flag[track_id] = 0
-
-                                # Out number counting
-                                elif prev_center[track_id][1] >= entrance_y2 and \
-                                center_y < entrance_y2:
-                                    out_flag[track_id] = 1
-                                elif prev_center[track_id][1] >= entrance_y1 and \
-                                center_y < entrance_y1 and out_flag[track_id] == 1:
-                                    out_id_list.append(track_id)
                                     out_flag[track_id] = 0
+                                
+                                count_str = f"In: {len(in_id_list)}, Out: {len(out_id_list)}"
+                                print(count_str)
 
-                                prev_center[track_id] = [center_x, center_y]
-                            else:
-                                prev_center[track_id] = [center_x, center_y]
-                                in_flag[track_id] = 0
-                                out_flag[track_id] = 0
-                            
-                            count_str = f"In: {len(in_id_list)}, Out: {len(out_id_list)}"
-                            print(count_str)
+                            if save_txt:
+                                # to MOT format
+                                bbox_left = output[0]
+                                bbox_top = output[1]
+                                bbox_w = output[2] - output[0]
+                                bbox_h = output[3] - output[1]
+                                # Write MOT compliant results to file
+                                with open(txt_path, 'a') as f:
+                                    f.write(('%g ' * 10 + '\n') % (frame_idx + 1, id, bbox_left,  # MOT format
+                                                                bbox_top, bbox_w, bbox_h, -1, -1, -1, -1))
 
-                        if save_txt:
-                            # to MOT format
-                            bbox_left = output[0]
-                            bbox_top = output[1]
-                            bbox_w = output[2] - output[0]
-                            bbox_h = output[3] - output[1]
-                            # Write MOT compliant results to file
-                            with open(txt_path, 'a') as f:
-                                f.write(('%g ' * 10 + '\n') % (frame_idx + 1, id, bbox_left,  # MOT format
-                                                               bbox_top, bbox_w, bbox_h, -1, -1, -1, -1))
+                    LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
+                else:
+                    deepsort.increment_ages()
+                    LOGGER.info('No detections')
 
-                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
+                # Stream results
+                im0 = annotator.result()
 
-            else:
-                deepsort.increment_ages()
-                # LOGGER.info('No detections')
-
-            # Stream results
-            im0 = annotator.result()
-            if show_vid:
-                
-                lw = 3
-                tf = max(lw - 1, 1)
-                w, h = cv2.getTextSize(s, 0, fontScale=lw / 3, thickness=tf)[0] 
-                p1 = (0,0)
-                p2 = (p1[0] + int(w), p1[1]+int(h)+10)
-                cv2.rectangle(im0, p1, p2, (0,240,240), -1, cv2.LINE_AA)  # filled
-                cv2.putText(im0, s, (p1[0], p1[1]+h+3), 0, lw / 3, (255,255,255),
-                            thickness=tf, lineType=cv2.LINE_AA)
-
-                if do_entrance_counting:
-                    w, h = cv2.getTextSize(count_str, 0, fontScale=lw / 3, thickness=tf)[0]
-                    p1 = (0,p2[1])
+                if show_vid:
+                    
+                    lw = 3
+                    tf = max(lw - 1, 1)
+                    w, h = cv2.getTextSize(s, 0, fontScale=lw / 3, thickness=tf)[0] 
+                    p1 = (0,0)
                     p2 = (p1[0] + int(w), p1[1]+int(h)+10)
-                    cv2.rectangle(im0, p1, p2, (240,240,0), -1, cv2.LINE_AA)  # filled
-                    cv2.putText(im0, count_str, (p1[0], p1[1]+h+3), 0, lw / 3, (255,255,255),
+                    cv2.rectangle(im0, p1, p2, (0,240,240), -1, cv2.LINE_AA)  # filled
+                    cv2.putText(im0, s, (p1[0], p1[1]+h+3), 0, lw / 3, (255,255,255),
                                 thickness=tf, lineType=cv2.LINE_AA)
-                    cv2.rectangle(im0,entrance1[0:2],entrance1[2:4],(0,255,255),1)
-                    cv2.rectangle(im0,entrance2[0:2],entrance2[2:4],(0,255,255),1)
 
-                # cv2.namedWindow(str(p),WINDOW_NORMAL)  
-                # cv2.resizeWindow(str(p),640,480)  
-                cv2.imshow(str(p), im0)
-                if cv2.waitKey(1) == ord('q'):  # q to quit
-                    raise StopIteration
+                    if do_entrance_counting:
+                        w, h = cv2.getTextSize(count_str, 0, fontScale=lw / 3, thickness=tf)[0]
+                        p1 = (0,p2[1])
+                        p2 = (p1[0] + int(w), p1[1]+int(h)+10)
+                        cv2.rectangle(im0, p1, p2, (240,240,0), -1, cv2.LINE_AA)  # filled
+                        cv2.putText(im0, count_str, (p1[0], p1[1]+h+3), 0, lw / 3, (255,255,255),
+                                    thickness=tf, lineType=cv2.LINE_AA)
+                        cv2.rectangle(im0,entrance1[0:2],entrance1[2:4],(0,255,255),1)
+                        cv2.rectangle(im0,entrance2[0:2],entrance2[2:4],(0,255,255),1)
 
-            # Save results (image with detections)
-            if save_vid:
-                if vid_path != save_path:  # new video
-                    vid_path = save_path
-                    if isinstance(vid_writer, cv2.VideoWriter):
-                        vid_writer.release()  # release previous video writer
-                    if vid_cap:  # video
-                        fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                        w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    else:  # stream
-                        fps, w, h = 30, im0.shape[1], im0.shape[0]
-                        save_path += '.mp4'
+                    # cv2.namedWindow(str(p),WINDOW_NORMAL)  
+                    # cv2.resizeWindow(str(p),640,480)  
+                    cv2.imshow(str(p), im0)
+                    if cv2.waitKey(1) == ord('q'):  # q to quit
+                        raise StopIteration
 
-                    vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                # Save results (image with detections)
+                if save_vid:
+                    if vid_path != save_path:  # new video
+                        vid_path = save_path
+                        if isinstance(vid_writer, cv2.VideoWriter):
+                            vid_writer.release()  # release previous video writer
+                        if vid_cap:  # video
+                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        else:  # stream
+                            fps, w, h = 30, im0.shape[1], im0.shape[0]
+                            save_path += '.mp4'
 
-                vid_writer.write(im0)
+                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
 
+                    vid_writer.write(im0)
+        else:
+            print("The tram is driving, detection is stopped.")
+            if cv2.waitKey(1) == ord('q'):  # q to quit
+                raise StopIteration
+            if do_entrance_counting:
+                in_id_list.clear()
+                out_id_list.clear()
+                in_flag.clear()
+                out_flag.clear()
+                prev_center.clear()
+                count_str = ""
 
     # Print results
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
@@ -381,8 +396,13 @@ if __name__ == '__main__':
     parser.add_argument('--roi', action='store_true', help='turn on roi filter')
     parser.add_argument('--en_counting', action='store_true', help='turn on entrance counting')
     parser.add_argument('--process', action='store_true', help='turn on image processing')
+    parser.add_argument('--topic', default='/usb_cam/image_raw/compressed', help='rostopic to be subscribed')
+    
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
 
     with torch.no_grad():
         detect(opt)
+
+
+
